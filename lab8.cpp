@@ -1,6 +1,6 @@
 #include <iostream>
-#include "DSM.h"
 #include <mpi.h>
+#include "Process.h"
 
 /* Notes:
 - USE ONLY SINGLE CHARACTER VARIABLES
@@ -30,6 +30,18 @@
 
         compare and exchange - 2 set operations on the same variable, it is kind of random which one succeeds and which one fails
 
+
+        the purpose of the prepare message is to tell the recepient that it will receive something and to wait for that before
+        notifying the app
+
+        - when framework gets set operation, mark that it is open and send prepare messages to subscribers
+        - when framework gets a prepare message, mark the operation as open and the timestamp + send back response
+        - when framework gets a response to a prepare message, mark it and when it gets all the prepares, send the set messages
+        - before sending notifications, compare the timestamps send as the response to the prepare to messages that are still open
+        - you can deliver a notification only if the timestamp is smaller than all timestamps in open messages
+        - when you receive a set operation from another framework, close the prepare and use that timestamp you just received
+        - store notifs in a queue before delivering them
+
 */
 
 void worker(int my_rank) {
@@ -39,10 +51,7 @@ void worker(int my_rank) {
     MPI_Status status;
     int nr_variables;
     MPI_Recv(&nr_variables, 1, MPI_INT, 0, 123, MPI_COMM_WORLD, &status);
-    if (nr_variables == -1) {
-        // abort
-        return;
-    }
+
     int parent = status.MPI_SOURCE;
     std::vector<char> variables;
     variables.resize(nr_variables);
@@ -60,7 +69,6 @@ void worker(int my_rank) {
         MPI_Recv(&var, 1, MPI_INT, 0, 123, MPI_COMM_WORLD, &status);
         MPI_Recv(&other, 1, MPI_INT, 0, 123, MPI_COMM_WORLD, &status);
         process->addOtherSubscriber(std::string(1, var), other);
-        //std::cout << my_rank << ' ' << other << '\n';
     }
 
     // now receive the operations to be performed
@@ -70,62 +78,57 @@ void worker(int my_rank) {
         MPI_Recv(&var, 1, MPI_INT, 0, 123, MPI_COMM_WORLD, &status);
         MPI_Recv(&val, 1, MPI_INT, 0, 123, MPI_COMM_WORLD, &status);
         process->addSetOperation(std::string(1, var), val);
-        //std::cout << my_rank << ' ' << var << '\n';
-    }
-
-    // create a structure to keep track of the prepare responses for each set operation based on its id
-    process->initializePrepareResponses();
-
-    // wait for the start message
-    int start;
-    MPI_Recv(&start, 1, MPI_INT, 0, 123, MPI_COMM_WORLD, &status);
-    if (start == -1) {
-        std::cout << "[Failed to start " << my_rank << "]\n";
-        return;
     }
 
     // iterate over each operation to be performed
     std::string variable;
     int ts;
     int code_send = 8; // code for the prepare messages
-    int index_operation = 0;
-    while (true) {
-        // select a set operation
-        std::pair<std::string, int> pair = process->runNextSetOperation();
-        variable = pair.first;
-        val = pair.second;
-
-        if (variable == "NONE" && val == -1) {
-            // no more set operations
-            break;
-        }
-
-        // store the prepare response for the current operation as if it was received already (it is for the current process)
-        process->storeReceivedPrepareResponse(variable, process->getTs(), my_rank, index_operation);
-        
-        // iterate over each subscriber to the variable of the selected operation
-        for (auto pid : process->getSubscribersForVariable(variable)) {
-            if (pid != process->getId()) { // don't send it to yourself
-                // send a prepare message to them
-                process->incrementTs();
-                ts = process->getTs();
-                //std::cout << "[SEND_PREPARE "<<my_rank<<"] " <<
-                    //variable[0] << ',' << val << ',' << ts << ',' << pid << " \n";
-                MPI_Send(&code_send, 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
-                MPI_Send(&variable[0], 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
-                MPI_Send(&val, 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
-                MPI_Send(&index_operation, 1, MPI_INT, pid, 123, MPI_COMM_WORLD); // send id of set operation to recognize it later
-                MPI_Send(&ts, 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
-            }
-        }
-        index_operation++;
-    }
-    
     int code_received = 0; // if -1 then stop
+    bool first_time = true;
+    SetOperationFramework sof;
+    SetOperation so;
     while (code_received != -1) {
-        MPI_Recv(&code_received, 1, MPI_INT, MPI_ANY_SOURCE, 123, MPI_COMM_WORLD, &status);
-        parent = status.MPI_SOURCE;
+        if (!first_time) {
+            MPI_Recv(&code_received, 1, MPI_INT, MPI_ANY_SOURCE, 123, MPI_COMM_WORLD, &status);
+            parent = status.MPI_SOURCE;
+        }
+        first_time = false;
         switch (code_received) {
+        case(0):
+            // select a set operation
+            so = process->runNextSetOperation();
+            variable = so.var;
+            val = so.val;
+
+            if (variable == "NONE" && val == -1) {
+                // no more set operations
+                code_received = 1;
+                break;
+            }
+
+            // store the local set operation to the frameworkOperation vector
+            // the ts of this should be changed later on when you received all prepare responses
+            sof.var = variable;
+            sof.val = val;
+            sof.ts = process->getTs();
+            process->addFrameworkOperation(sof);
+
+            // iterate over each subscriber to the variable of the selected operation
+            // and send them a prepare message
+            for (auto pid : process->getSubscribersForVariable(variable)) {
+                if (pid != process->getId()) { // don't send it to yourself
+                    process->incrementTs();
+                    ts = process->getTs();
+                    code_send = 8;
+                    MPI_Send(&code_send, 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
+                    MPI_Send(&variable[0], 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
+                    MPI_Send(&val, 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
+                    MPI_Send(&ts, 1, MPI_INT, pid, 123, MPI_COMM_WORLD);
+                }
+            }
+            code_received = 0;
+            break;
         case(-1):
             // stop listening
             break;
@@ -133,13 +136,12 @@ void worker(int my_rank) {
             // receiving a prepare message
             MPI_Recv(&var, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             MPI_Recv(&val, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
-            MPI_Recv(&index_operation, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             MPI_Recv(&ts, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             // update timestamp of the current process
             process->setTs(std::max(ts, process->getTs()) + 1);
             ts = process->getTs();
-            // store received prepare
-            process->storeReceivedPrepare(std::string(1, var), ts, parent, index_operation);
+            // store received prepare (marks it as open)
+            process->storeReceivedPrepare(std::string(1, var), ts, parent);
 
             // send a response to the prepare message sender
             code_send = 9; // code for sending back a response to a prepare message
@@ -147,7 +149,6 @@ void worker(int my_rank) {
             // send the variable and the new timestamp
             MPI_Send(&var, 1, MPI_INT, parent, 123, MPI_COMM_WORLD);
             MPI_Send(&val, 1, MPI_INT, parent, 123, MPI_COMM_WORLD);
-            MPI_Send(&index_operation, 1, MPI_INT, parent, 123, MPI_COMM_WORLD);
             MPI_Send(&ts, 1, MPI_INT, parent, 123, MPI_COMM_WORLD);
             break;
         case(9):
@@ -155,39 +156,51 @@ void worker(int my_rank) {
             // receive the variable and the new timestamp
             MPI_Recv(&var, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             MPI_Recv(&val, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
-            MPI_Recv(&index_operation, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             MPI_Recv(&ts, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             // change the ts of the current process
             process->setTs(std::max(ts, process->getTs()) + 1);
+            ts = process->getTs();
             // store the fact that you've received a response to a prepare message
             // note that the ts received is stored
-            process->storeReceivedPrepareResponse(std::string(1, var), ts, parent, index_operation);
+            process->storeReceivedPrepareResponse(std::string(1, var), ts, parent);
 
-            // now check if you've received responses to all prepare messages
-            if(process->canSendNotifications(std::string(1, var), index_operation)) {
-                // increment the ts (you'll be sending anyway)
-                process->incrementTs();
-                // if yes, send the notifications based on the timestamps
-                process->sendNotifications(my_rank, index_operation);
+            // now check whether the triplets can be sent (if all responses were received)
+            if (process->receivedAllPrepareResponses(std::string(1, var))) {
+                // change triplet of local set operation
+                process->updateLocalSetOperationTimestamp();
+                // if yes, send the triplets to the frameworks
+                process->sendTriplets(my_rank);
             }
-
             break;
         case(10):
-            // actually set the value by receiving the triple (var,val,ts)
+            // receive the set operation from the other party
             MPI_Recv(&var, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             MPI_Recv(&val, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
             MPI_Recv(&ts, 1, MPI_INT, parent, 123, MPI_COMM_WORLD, &status);
-            //std::cout << std::string(1, var) << ' ' << val << ' ' << ts << "!!!\n";
             // increment the ts
             process->setTs(std::max(ts, process->getTs()) + 1);
-            // set the value
-            process->setValueForVariable(std::string(1, var), val);
-            // write to the log
-            process->addLog("SET(" + std::string(1, var) + "," + std::to_string(val) + ") ts=" + std::to_string(process->getTs()));
 
-            // send a stop message for now
-            code_send = -1;
-            MPI_Send(&code_send, 1, MPI_INT, parent, 123, MPI_COMM_WORLD);
+            // close the prepare
+            process->closePrepare(std::string(1, var));
+
+            // store the set operation in the framework
+            sof.var = std::string(1, var);
+            sof.val = val;
+            sof.ts = ts;
+            process->addFrameworkOperation(sof);
+
+            // check for failed messages and retry sending them
+            process->retrySendingFailedTriplets();
+
+            // now check if you've received all operations for the prepare messages received
+            if (process->receivedAllOperationsForPrepares()) {
+                process->sendNotificationsFromFramework();
+            }
+
+            // stop parent process
+            code_received = -1;
+            //code_send = -1;
+            //MPI_Send(&code_send, 1, MPI_INT, parent, 123, MPI_COMM_WORLD);
             break;
         default:
             std::cout << "Error: invalid code received in process " << my_rank << "; code=" << code_received << '\n';
@@ -252,15 +265,6 @@ void example1(int noProcs) {
     int nr_operations_2 = 1;
     MPI_Send(&nr_operations_2, 1, MPI_INT, 2, 123, MPI_COMM_WORLD);
     sendOperation('Y', 7, 2);
-
-    // define DSM
-    DSM dsm(processes);
-
-    // send a start signal to each process to begin the process
-    int start = 1;
-
-    MPI_Send(&start, 1, MPI_INT, 1, 123, MPI_COMM_WORLD);
-    MPI_Send(&start, 1, MPI_INT, 2, 123, MPI_COMM_WORLD);
 }
 
 void example2(int noProcs) {
@@ -351,23 +355,11 @@ void example2(int noProcs) {
     sendOperation('C', 4, 4);
     sendOperation('C', 5, 4);
     sendOperation('E', 7, 4);
-
-    // define DSM
-    DSM dsm(processes);
-
-    // send a start signal to each process to begin the process
-    int start = 1;
-
-    MPI_Send(&start, 1, MPI_INT, 1, 123, MPI_COMM_WORLD);
-    MPI_Send(&start, 1, MPI_INT, 2, 123, MPI_COMM_WORLD);
-    MPI_Send(&start, 1, MPI_INT, 3, 123, MPI_COMM_WORLD);
-    MPI_Send(&start, 1, MPI_INT, 4, 123, MPI_COMM_WORLD);
 }
 
 // run using:
 // - mpiexec -n 3 lab8
 // - mpiexec -n 5 lab8
-// won't work with different values for n
 int main()
 {
     MPI_Init(NULL, NULL);
@@ -375,6 +367,7 @@ int main()
     int my_rank, noProcs;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &noProcs);
+
     if (my_rank == 0) {
         // parent
         if (noProcs == 3) {
