@@ -5,7 +5,7 @@
 /* Notes:
 - USE ONLY SINGLE CHARACTER VARIABLES
 - both applications must agree on the order of events
-- from the app you make changes, the framework notifies te app back of the changes (log these changes)
+- from the app you make changes, the framework notifies the app back of the changes (log these changes)
 - fixed set of variables
 - subscriptions only for some variables (receive notifs only for those)
 - first, use lamport clocks for deciding which of the set operations occur first
@@ -15,8 +15,8 @@
         deliver notifications in the order of those timestamps
 
         when framework receives a message, mark the timestamp, send message to all other subscribers (name of variable, value to be set, ts)
-        now every node has these types of messages receives. Deliver them to the corresponding app in the order of the ts
-        PROBLEM: you don't know when it is safe to deliver a certain message - you can't know if in the future you'll receive a message with a lower ts
+        now every node has these types of messages received. Deliver them to the corresponding app in the order of the ts.
+        ISSUE: you don't know when it is safe to deliver a certain message - you can't know if in the future you'll receive a message with a lower ts
 - solution: another exchange of messages (introduces a time penalty)
         when set operation comes to framework, the framework sends a prepare message to all subscribers of the set variable
         the subscribers will send back a response to the originator with a TS value
@@ -37,7 +37,7 @@
         - when framework gets set operation, mark that it is open and send prepare messages to subscribers
         - when framework gets a prepare message, mark the operation as open and the timestamp + send back response
         - when framework gets a response to a prepare message, mark it and when it gets all the prepares, send the set messages
-        - before sending notifications, compare the timestamps send as the response to the prepare to messages that are still open
+        - before sending notifications, compare the timestamps sent as the response to the prepare to messages that are still open
         - you can deliver a notification only if the timestamp is smaller than all timestamps in open messages
         - when you receive a set operation from another framework, close the prepare and use that timestamp you just received
         - store notifs in a queue before delivering them
@@ -103,7 +103,7 @@ void worker(int my_rank) {
 
             if (variable == "NONE" && val == -1) {
                 // no more set operations
-                code_received = 1;
+                code_received = -1;
                 break;
             }
 
@@ -166,9 +166,9 @@ void worker(int my_rank) {
 
             // now check whether the triplets can be sent (if all responses were received)
             if (process->receivedAllPrepareResponses(std::string(1, var))) {
-                // change triplet of local set operation
+                // change the triplet of the local set operation
                 process->updateLocalSetOperationTimestamp();
-                // if yes, send the triplets to the frameworks
+                // send the triplets to the frameworks
                 process->sendTriplets(my_rank);
             }
             break;
@@ -214,7 +214,7 @@ void worker(int my_rank) {
     process->displayLog();
 }
 
-void sendTriple(char var, int dest, int other) {
+void sendTriplet(char var, int dest, int other) {
     MPI_Send(&var, 1, MPI_INT, dest, 123, MPI_COMM_WORLD);
     MPI_Send(&other, 1, MPI_INT, dest, 123, MPI_COMM_WORLD);
 }
@@ -248,13 +248,13 @@ void example1(int noProcs) {
     MPI_Send(&for_p1, 1, MPI_INT, 1, 123, MPI_COMM_WORLD);
     MPI_Send(&for_p2, 1, MPI_INT, 2, 123, MPI_COMM_WORLD);
     // for X, send p2 to p1
-    sendTriple('X', 1, 2);
+    sendTriplet('X', 1, 2);
     // for Y, send p2 to p1
-    sendTriple('Y', 1, 2);
+    sendTriplet('Y', 1, 2);
     // for X, send p1 to p2
-    sendTriple('X', 2, 1);
+    sendTriplet('X', 2, 1);
     // for Y, send p1 to p2
-    sendTriple('Y', 2, 1);
+    sendTriplet('Y', 2, 1);
 
     // send to each process the operations to be performed
     // send Set(X, 5) to p1
@@ -303,29 +303,29 @@ void example2(int noProcs) {
     MPI_Send(&for_p3, 1, MPI_INT, 3, 123, MPI_COMM_WORLD);
     MPI_Send(&for_p4, 1, MPI_INT, 4, 123, MPI_COMM_WORLD);
     // for A, send p2 to p1
-    sendTriple('A', 1, 2);
+    sendTriplet('A', 1, 2);
     // for B, send p2 to p1
-    sendTriple('B', 1, 2);
+    sendTriplet('B', 1, 2);
     // for E, send p2 to p1
-    sendTriple('E', 1, 2);
+    sendTriplet('E', 1, 2);
     // for A, send p1 to p2
-    sendTriple('A', 2, 1);
+    sendTriplet('A', 2, 1);
     // for B, send p1 to p2
-    sendTriple('B', 2, 1);
+    sendTriplet('B', 2, 1);
     // for E, send p2 to p1
-    sendTriple('E', 2, 1);
+    sendTriplet('E', 2, 1);
     // for C, send p4 to p3
-    sendTriple('C', 3, 4);
+    sendTriplet('C', 3, 4);
     // for D, send p4 to p3
-    sendTriple('D', 3, 4);
+    sendTriplet('D', 3, 4);
     // for E, send p4 to p3
-    sendTriple('E', 3, 4);
+    sendTriplet('E', 3, 4);
     // for C, send p3 to p4
-    sendTriple('C', 4, 3);
+    sendTriplet('C', 4, 3);
     // for D, send p3 to p4
-    sendTriple('D', 4, 3);
+    sendTriplet('D', 4, 3);
     // for E, send p3 to p4
-    sendTriple('E', 4, 3);
+    sendTriplet('E', 4, 3);
 
     // send to each process the operations to be performed
     // send 4 operations to p1
